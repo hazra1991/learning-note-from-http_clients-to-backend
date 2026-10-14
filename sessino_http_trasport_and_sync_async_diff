@@ -176,3 +176,156 @@ Python (httpx)	Client / AsyncClient	BaseTransport + httpcore
 Go	http.Client	http.Transport
 Java	HttpClient	connection pool internals
 
+=============================================================
+The Request Dispatch Chain — request(), send(), and Everything In Between
+(Deep dive into httpx and requests internals)
+
+1. The Core Fact: Verb Methods Are Just Sugar
+Every HTTP verb method (.get(), .post(), etc.) is a thin wrapper around .request().
+
+From the actual httpx source:
+
+python
+Copy
+def get(self, url, *, params=None, headers=None, ...):
+    return self.request("GET", url, params=params, headers=headers, ...)
+
+def post(self, url, *, json=None, data=None, ...):
+    return self.request("POST", url, json=json, data=data, ...)
+
+def put(self, url, ...):
+    return self.request("PUT", url, ...)
+Every single verb method just calls self.request() with the method name hardcoded.
+
+python
+Copy
+await client.get("/users")                 # convenience
+await client.request("GET", "/users")      # exactly the same thing
+Why this design?
+request() is the single funnel point — one place where the full signature lives, with the method passed as a value (so it can be dynamic: client.request(method, url)).
+.get() / .post() exist purely for ergonomics/readability, and each exposes only kwargs that make sense for that verb — e.g. get() doesn't accept json= or data= (a GET body is unusual), while post() does.
+💡 For library/framework code, calling request() directly is arguably better — you can pass the HTTP method as a variable instead of dispatching through getattr(client, method.lower())(...).
+2. The Full Dispatch Chain (httpx)
+request() is NOT the bottom of the chain — it doesn't touch the network:
+
+code
+Copy
+client.get(url)                    ← sugar
+   ↓
+client.request("GET", url, ...)    ← dispatcher
+   ↓
+client.build_request(...)          ← creates Request object
+   │                                 (merges headers, cookies, params, auth setup)
+   ↓
+client.send(request)               ← where the REAL machinery happens:
+   ├── auth flow                     — may yield multiple requests (retries, challenges)
+   ├── _transport_for_url(url)       ← THE MOUNT RESOLUTION
+   │     └── pattern.matches(url) → transport
+   ├── transport.handle_async_request(request)
+   │                                 ← pool, sockets, TLS, actual bytes
+   └── redirect loop                 ← loops back to send for each redirect
+   ↓
+Response
+Key points
+request() doesn't touch the network — it just builds the Request and hands it to send().
+The mount lookup (_transport_for_url) happens inside send(), not in request(). So even calling client.send(my_request) directly still applies mount routing.
+Routing lives in send() because of the redirect loop: a redirect may bounce you from https://a.com to https://b.com, so the transport is re-resolved per request in the loop.
+3. The Mount Resolution Code (httpx)
+python
+Copy
+def _transport_for_url(self, url: URL) -> AsyncBaseTransport:
+    """
+    Returns the transport instance that should be used for a given URL.
+    This will either be the standard connection pool, or a proxy.
+    """
+    for pattern, transport in self._mounts.items():
+        if pattern.matches(url):
+            return self._transport if transport is None else transport
+
+    return self._transport
+Note the None value case: a mount entry with transport=None falls back to the default transport. And if no pattern matches at all → default transport.
+
+4. requests — The Exact Same Story
+requests has an identical structure:
+
+python
+Copy
+# requests/sessions.py — simplified
+def get(self, url, **kwargs):
+    return self.request("GET", url, **kwargs)
+
+def post(self, url, data=None, json=None, **kwargs):
+    return self.request("POST", url, data=data, json=json, **kwargs)
+
+def request(self, method, url, params=None, data=None, headers=None, ...):
+    # build a Request object
+    req = Request(method=method.upper(), url=url, ...)
+    prepared = self.prepare_request(req)     # ← merge session state
+    return self.send(prepared, **send_kwargs)
+
+def send(self, prepared_request, **kwargs):
+    # resolve adapter
+    adapter = self.get_adapter(url=prepared_request.url)   # ← mount prefix matching
+    resp = adapter.send(prepared_request, **kwargs)        # ← urllib3 pool, sockets
+    # cookies extracted, redirects resolved
+    # (each redirect loops back through resolve_redirects → send)
+    return resp
+Same funnel:
+
+code
+Copy
+s.get(url)            ← sugar
+   ↓
+s.request("GET", ...) ← dispatcher
+   ↓
+prepare_request()     ← merge session headers/cookies/auth/params → PreparedRequest
+   ↓
+s.send()              ← get_adapter(url) → mount matching → adapter.send()
+   ↓
+urllib3 pool → socket → bytes → Response
+   ↓
+redirects / cookies / hooks
+5. Manual Request Preparation — Taking Over the Request Object
+You can bypass the sugar and control the request object itself. There are two levels:
+
+Level 1: s.request() — skip the sugar, keep the pipeline
+python
+Copy
+s = requests.Session()
+s.request("GET", "/users", timeout=5)
+Same as s.get(). Nothing skipped except the verb method.
+
+Level 2: PreparedRequest — full control of the wire request
+python
+Copy
+req = requests.Request("GET", "https://api.com/users", headers={"X": "1"})
+prepared = s.prepare_request(req)   # session merges ITS headers/cookies/auth in
+resp = s.send(prepared)
+Why do this?
+
+Inspect the exact final request before sending (debugging exactly what goes on the wire — final URL, final headers after session merge).
+Reuse a prepared request — build once, send with modifications, or cache signed requests.
+Templates — prepare a base request, tweak per call.
+⚠️ Gotcha: requests.Request(...).prepare() (without a session) gives you a bare prepared request with no session state merged. Use s.prepare_request(req) instead.
+httpx equivalent
+python
+Copy
+req = client.build_request("GET", "/users", json={...})   # merged with client config
+# inspect req.headers, req.url, modify...
+resp = await client.send(req)
+6. The Unified Comparison Table
+Stage	requests	httpx
+Sugar verbs	s.get(), s.post()	client.get(), client.post()
+Dispatcher	s.request()	client.request()
+Build request obj	prepare_request() → PreparedRequest	build_request() → Request
+Real machinery	s.send()	client.send() / await
+Mount resolution	get_adapter(url) inside send	_transport_for_url(url) inside send
+Connection pool	adapter → urllib3	transport → httpcore
+Redirect handling	loop inside send()	loop inside send()
+7. Entry Points — Which One Should You Use?
+Entry point	When to use
+Sugar verbs (get, post)	Scripts, quick one-offs, readable top-level code
+request()	Dynamic method dispatch (frameworks, API wrappers): session.request(method, path, timeout=self._timeout, **kwargs)
+build_request / prepare_request + send()	Inspecting/modifying the exact wire request, request templates, caching signed requests
+The one-line takeaway
+Verbs are sugar → request() is the dispatcher → send() is where everything real happens (mount routing, auth flows, redirects, transport). You can enter the chain at any of these three levels depending on how much control you need.
