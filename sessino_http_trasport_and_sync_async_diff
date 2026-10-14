@@ -329,3 +329,88 @@ request()	Dynamic method dispatch (frameworks, API wrappers): session.request(me
 build_request / prepare_request + send()	Inspecting/modifying the exact wire request, request templates, caching signed requests
 The one-line takeaway
 Verbs are sugar → request() is the dispatcher → send() is where everything real happens (mount routing, auth flows, redirects, transport). You can enter the chain at any of these three levels depending on how much control you need.
+
+
+############### more additinoal additinoa or clasrrificatinos tot eh above things 
+You've hit on the exact right intuition: it depends entirely on which client you're using. Both httpx.Client and httpx.AsyncClient have the same chain (get → request → build_request → send) — the difference is just async/await sprinkled on every network-touching step. Let me redo the table properly.
+
+Corrected table — split by client type
+Stage	requests (Session)	httpx sync (Client)	httpx async (AsyncClient)
+Sugar verbs	s.get(), s.post()	client.get() — sync	await client.get() — async def
+Dispatcher	s.request()	client.request()	await client.request()
+Build request obj	prepare_request() → PreparedRequest	build_request() → Request — sync, no await	build_request() — also sync, no await ⚠️
+Real machinery	s.send()	client.send()	await client.send()
+Mount resolution	get_adapter(url) inside send	_transport_for_url(url) — sync	same method — sync, no await ⚠️
+Connection pool	adapter → urllib3 (sync)	transport → httpcore sync pool	transport → httpcore async pool (uses anyio)
+Redirect handling	loop inside send()	sync loop inside send()	async loop with await per hop
+Key clarification on your doubt
+"you said there is no async .get in httpx"
+That was about the module-level one-shot only:
+
+python
+Copy
+httpx.get(...)           # ✅ exists, sync only
+await httpx.get(...)     # ❌ does NOT exist — no async one-shot
+await client.get(...)    # ✅ totally fine — AsyncClient.get IS async
+Once you have an AsyncClient, everything is async — get, post, request, send, stream. The client type determines sync vs async, exactly as you guessed. The methods even mirror each other:
+
+python
+Copy
+# httpx source — AsyncClient
+async def get(self, url, ...):
+    return await self.request("GET", url, ...)
+
+async def request(self, method, url, ...):
+    request = self.build_request(...)   # ← still sync! no await
+    return await self.send(request, ...)
+
+async def send(self, request, ...):
+    ...
+Note the two "surprise" sync methods on AsyncClient
+build_request() is sync even on AsyncClient — it only merges headers/cookies/params into a Request object; no I/O happens, so there's nothing to await. (await client.build_request(...) would actually raise an error.)
+_transport_for_url() is sync too — it's just a dict lookup over _mounts. Only transport.handle_async_request() (the actual bytes-over-the-wire part) is async.
+Rule of thumb: anything that touches the network or the event loop is async; anything that's pure object construction/lookup stays sync — in both libraries.
+
+Difference between request() and prepare_request() (requests)
+These do different jobs and are often confused because both "build" something:
+
+session.request(method, url, ...) — the full dispatcher
+Takes raw user input, builds AND sends the request.
+Internally it does: Request(...) → prepare_request() → send().
+Returns a Response (network was actually hit).
+Merges session state (headers, cookies, auth, hooks).
+python
+Copy
+resp = s.request("GET", url)   # full pipeline: build + send
+session.prepare_request(Request(...)) — build only, no send
+Takes a requests.Request object, merges session state, returns a PreparedRequest.
+No network I/O. Nothing is sent.
+Gives you the exact final wire request to inspect/tweak/serialize before sending.
+python
+Copy
+req = requests.Request("GET", url, headers={"X": "1"})
+prepared = s.prepare_request(req)   # ← still nothing sent
+
+print(prepared.url)        # final URL with params merged
+print(prepared.headers)    # final headers after session merge
+print(prepared.body)       # exactly what will go on the wire
+
+resp = s.send(prepared)    # ← NOW the network call happens
+Side-by-side
+request()	prepare_request()
+Input	method, url, kwargs	a Request object
+Output	Response (already sent)	PreparedRequest (not sent)
+Network I/O	✅ yes	❌ none
+Session merge	✅	✅
+Use case	normal calls	inspecting, modifying, caching, templates
+Chain relationship
+code
+Copy
+request()  =  prepare_request()  +  send()
+             (build + merge)      (I/O)
+httpx equivalent:
+
+requests	httpx
+s.prepare_request(req)	client.build_request("GET", url, ...)
+s.send(prepared)	client.send(req) (or await)
+Same split: build (sync, pure) vs send (I/O — sync in Client/Session, async in AsyncClient).
