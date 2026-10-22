@@ -355,7 +355,261 @@ sudo systemctl restart docker     # apply the new ExecStart to the running proce
 
 ---
 
-## 12. One-page cheat sheet
+## 12. Service types (`Type=`) — simple, oneshot, notify, and the default rule
+
+Every `[Service]` has a `Type=`. It answers one question: **"How does systemd decide the service has finished starting?"** Different kinds of programs "become ready" in different ways, so systemd needs to know which readiness model to use. Get this wrong and systemd's idea of "started/active" won't match reality.
+
+### What is the default if you omit `Type=`?
+
+A natural question: the boardfarm and nginx files don't all spell out a `Type=`, so is the default `simple`? **Almost — but the real rule has a twist:**
+
+- No `Type=` **and** you have an `ExecStart=` → defaults to **`simple`**.
+- No `Type=` **and** you have **no** `ExecStart=` (only `ExecStartPre`/`ExecStartPost`) → defaults to **`oneshot`**.
+
+So "no Type line = simple" is true *only* when there's an `ExecStart` (which is the usual case — that's why boardfarm is effectively `simple`). But it isn't a universal law.
+
+> **Don't rely on the default.** Write `Type=` explicitly. The file then documents its own intent and nobody has to remember these edge rules.
+
+> **Watch out — "no Type line" ≠ "always simple".** Your Docker unit sets `Type=notify` *explicitly*. It is neither simple nor defaulted. Always check for an explicit `Type=` before assuming.
+
+### The three types you'll actually meet
+
+| `Type=` | Shape of the program | systemd considers it "started" when… | Example |
+|---|---|---|---|
+| `simple` | Long-running daemon that **stays alive** in the foreground | …the instant `ExecStart` is launched (systemd does **not** check readiness) | boardfarm API, nginx |
+| `oneshot` | Runs, does its work, **exits** | …the process has **finished and exited** | a periodic sync/backup job fired by a timer |
+| `notify` | Long-running daemon, but it **signals readiness** itself | …the app sends a `READY=1` message back to systemd | Docker |
+
+(There are more — `forking`, `exec`, `dbus`, `idle` — but these three cover almost everything you'll touch.)
+
+The key distinction between `simple` and `notify`: with `simple`, "active" just means "process launched." With `notify`, "active" means "the app told me it's genuinely ready to serve." That matters when other units depend on this one being truly up.
+
+### Deep dive: how `Type=notify` actually works (the mechanism)
+
+With `notify`, systemd holds the service in an **"activating"** state and waits for the app to explicitly say *"I'm ready now"* before flipping it to **"active"** (and before starting anything that depends on it). So the app has to send a signal back. The wire protocol is simple and has **no magic**:
+
+1. When `Type=notify`, systemd creates a **Unix-domain datagram socket** and passes its address to the process via an environment variable, **`NOTIFY_SOCKET`**.
+2. Once the app finishes its startup work, it **sends a tiny datagram containing `READY=1`** to that socket. (The only value worth sending is `READY=1`; there is no "not ready" message.)
+3. systemd receives it and marks the unit active. If it never arrives within the start timeout, the service is marked **failed**.
+
+It's a stable, documented ABI that explicitly allows independent implementations — which is why some projects just write the datagram directly instead of linking a library. The **raw** version in Python (this is literally all a helper library does):
+
+```python
+import os, socket
+
+addr = os.environ["NOTIFY_SOCKET"]
+if addr.startswith("@"):          # "@" = abstract-namespace socket
+    addr = "\0" + addr[1:]
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+sock.sendto(b"READY=1\n", addr)
+```
+
+The **easy** version — use the small `sdnotify` library:
+
+```python
+import sdnotify
+sdnotify.SystemdNotifier().notify("READY=1")
+```
+
+For shell/bash jobs there's even a wrapper: `systemd-notify --ready`.
+
+### Wiring `notify` into a FastAPI app (boardfarm example)
+
+Send `READY=1` **after** real startup is done (DB open, caches warm) — in FastAPI's lifespan startup hook. Uvicorn won't emit it for you:
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+import sdnotify
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- startup: connect DB, warm caches, etc. ---
+    sdnotify.SystemdNotifier().notify("READY=1")   # NOW tell systemd we're ready
+    yield
+    # --- shutdown ---
+
+app = FastAPI(lifespan=lifespan)
+```
+
+Unit file:
+
+```ini
+[Service]
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/local/bin/uv run uvicorn my-service.api.app:app --host 127.0.0.1 --port 8000
+```
+
+### ⚠️ The `NotifyAccess` gotcha (bites `uv run` / wrapper setups)
+
+Recall that a wrapped launch has a **two-process tree**: the wrapper is the Main PID, the real app is its **child**:
+
+```
+├─ <MainPID>  /usr/local/bin/uv run uvicorn ...   ← Main PID (the wrapper, `uv`)
+└─ <childPID> .../python .../uvicorn ...          ← the actual app (a CHILD)
+```
+
+By default **`NotifyAccess=main`** — systemd only accepts `READY=1` **from the Main PID**. But here the Main PID is the wrapper, while the thing that sends `READY=1` is the child. systemd ignores the child's message, never sees readiness, times out, and marks the service **failed** — the classic *"it's clearly running but systemd says failed"* trap. Two fixes:
+
+- **Easiest:** `NotifyAccess=all` — accept the notification from any process in the service's cgroup (including the child).
+- **Cleaner:** make the app the Main PID so the sender *is* the Main PID — run the venv's uvicorn directly (`ExecStart=/path/.venv/bin/uvicorn ...`) and drop the `uv run` wrapper, since the wrapper forks the app as a child rather than replacing itself.
+
+### Should you bother with `notify`?
+
+For a single app behind nginx, **`Type=simple` is usually fine** — `notify` is extra moving parts. `notify` earns its keep when *something else depends on this service being truly ready*: e.g. another unit with `After=my-service.service` that must not start until the API can serve, or you want `systemctl restart` to block until the app is genuinely up. No such need → `simple` is the pragmatic choice.
+
+---
+
+## 13. Scheduled jobs — cron vs systemd timers (and what "migrated to systemd" means)
+
+So far every service has been a long-running process (boardfarm API, nginx, Docker). But a lot of work is *periodic* instead — "run this every 5 minutes," "back up the DB at 3am." For that you need a **scheduler**, and Linux has **two different ones**.
+
+### There are two separate schedulers on a Linux box
+
+**cron** is the old, traditional Unix scheduler. It's a daemon that wakes up every minute and checks a set of "crontab" files to see if any job is due. Each user can have their own crontab, stored at `/var/spool/cron/crontabs/<user>` (that's where files like `balbarda` and `root` live). A crontab line looks like this:
+
+```
+*/5 * * * *  cd /opt/... && make run_mgmt_cmd CMD='sync_kamailio'
+│   │ │ │ │
+│   │ │ │ └─ day of week
+│   │ │ └─── month
+│   │ └───── day of month
+│   └─────── hour
+└─────────── minute   →  */5 = "every 5 minutes"
+```
+
+One line = **schedule + command**, all in one place. Simple, but limited.
+
+**systemd timers** are the systemd-native way to schedule things. Here's the key mental shift: instead of one crontab line, a scheduled job becomes **two unit files** — the same `.service` idea you already know, plus a new `.timer` partner:
+
+- The **`.service`** = *what to run* (the command).
+- The **`.timer`** = *when to run it* (the schedule).
+
+The timer "triggers" the service. That's the whole model.
+
+> **Mental model:** cron and systemd timers are **two tools in the same category** — like two brands of alarm clock. A machine can run both at once. Many teams standardize on systemd and move jobs off cron.
+
+### What does "migrated to systemd" actually mean?
+
+It means **a human took the old cron line and recreated it as a `.timer` + `.service` pair**, then switched the cron line off. For a job called `my-service`, someone:
+
+1. Created `/etc/systemd/system/my-service.service` — runs the command.
+2. Created `/etc/systemd/system/my-service.timer` — fires every 5 minutes.
+3. Enabled the timer: `sudo systemctl enable --now my-service.timer`.
+4. **Commented out** the old cron line so cron stops running it.
+
+That last step is why a migrated crontab line becomes dead text:
+
+```
+# MIGRATED-TO-SYSTEMD 2026-09-07: */5 * * * * cd /opt/... && make run_mgmt_cmd CMD='sync_kamailio'
+```
+
+> **Important:** that `# MIGRATED-TO-SYSTEMD` prefix is **not a cron feature or a systemd feature — it's just a comment a person typed.** It's a breadcrumb convention a team uses so future-you can see "this used to run in cron, it's been moved, here's where it went." The leading `#` makes cron ignore the whole line. The job is no longer a cron job — it's a systemd timer now.
+
+So, directly: **before the migration it *was* a cron job; after, it is *not* — it's a systemd timer+service.** "Moving it" means re-expressing the exact same schedule+command in systemd's format and turning off the cron version.
+
+### Was any of this automatic?
+
+**No — none of it is automatic.** A person (or a deploy script a person wrote) created those two files, enabled the timer, and commented out the cron line. systemd does **not** "absorb" cron jobs on its own. The only automatic part happens *afterward*: once the timer is enabled, systemd fires it every 5 minutes forever — exactly like a service starts on boot.
+
+### What the two files look like
+
+The **`.service`** (note `Type=oneshot` — this is the big difference from a long-running API):
+
+```ini
+[Unit]
+Description=My service — periodic sync job
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/my-app/active_deployment
+ExecStart=/usr/bin/make run_mgmt_cmd CMD=sync_kamailio
+```
+
+The **`.timer`**:
+
+```ini
+[Unit]
+Description=Run my-service every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5          # every 5 minutes
+Persistent=true           # if the machine was off, run a catch-up on next boot
+
+[Install]
+WantedBy=timers.target
+```
+
+### Two things to burn into memory
+
+**1. `Type=oneshot` vs `Type=simple`.** (Full type reference is in **Section 12**.)
+
+| | `Type=simple` | `Type=oneshot` |
+|---|---|---|
+| Shape | Long-running daemon that **stays alive** | Runs, does its work, and **exits** |
+| Example | boardfarm API, nginx | a periodic sync/backup job |
+| State most of the time | Active (running) | Inactive (dead) — the timer revives it on schedule |
+
+A scheduled job is `Type=oneshot`: it's "dead" most of the time, and the timer brings it back to life every 5 minutes. That's the correct shape for a periodic task.
+
+**2. The name pairing.** The timer and service share the **same base name** (`my-service.timer` ↔ `my-service.service`). That's how systemd knows they belong together — a `.timer` automatically triggers the `.service` with the identical name. (You *can* override this with a `Unit=` line in `[Timer]`, but by default it's name-matching.) This is also why you run `systemctl enable` on the **`.timer`**, not the service — you enable the *schedule*, and the schedule pulls the service.
+
+### Where do `.timer` files live?
+
+**Exactly the same service-discovery paths as `.service` files** — nothing new to learn here. A `.timer` is just another unit type, so it obeys the same rules from Section 4:
+
+```
+/etc/systemd/system/      ← your timers & overrides (wins)      e.g. /etc/systemd/system/my-service.timer
+/run/systemd/system/      ← runtime (ephemeral)
+/usr/lib/systemd/system/  ← package-installed (never edit)
+```
+
+The only differences from a `.service`:
+- The file ends in **`.timer`** instead of `.service` (that's how systemd knows it's a timer).
+- Its `[Install] WantedBy=` is **`timers.target`** instead of `multi-usget` — so `enable` wires it into the timer-activation stage rather than the normal boot stage. Same symlink mechanism (Section 6), different target directory (`timers.target.wants/`).
+
+### Why teams bother moving cron → systemd
+
+The schedule is identical, so the payoff is everything *around* it:
+
+- **Real logs.** `journalctl -u my-service.service` gives every run's output, exit code, and timestamp. With cron you'd get an email nobody reads, or you'd manually redirect to a log file.
+- **Status at a glanc `systemctl list-timers` shows next/last fire times; `systemctl status …service` tells you if the last run succeeded or failed.
+- **Dependencies & ordering.** `After=`, `Requires=`, etc. — a timer can wait for the network or a database. Cron can't.
+- **Catch-up runs.** `Persistent=true` reruns a missed job after downtime. Plain cron just skips it.
+- **One management surface.** Your API, nginx, Docker, and scheduled jobs are all managed the same way with `systemctl` and `journalctl`.
+
+### What you can doh it (the split: enable the timer, start the service)
+
+```bash
+# See the exact definitions (schedule + command)
+systemctl cat my-service.timer my-service.service
+
+# Is the schedule live? next/last fire time?
+systemctl list-timers --all | grep my-service
+systemctl status my-service.timer
+
+# Did the LAST run succeed or fail?
+systemctl status my-service.service
+
+# The per-run logs/failures — this is where a repeating error shows up
+journalctl -u my-service.service --since today --no-pager
+
+# Run it RIGHT NOWy hand (great for testing a fix) — start the .service, not the timer
+sudo systemctl start my-service.service
+
+# Stop the schedule entirely (e.g. while you fix something) — disable the .timer
+sudo systemctl disable --now my-service.timer
+```
+
+> **Remember the split:**
+> - You **enable/disable the `.timer`** → that controls the *schedule*.
+> - You **start the `.service`** directly → that triggers *a single run on demand*.
+> - You **read logs from the `.service`** → because that's the thing that actuand produces output.
+
+---
+
+## 14. One-page cheat sheet
 
 **Concepts**
 - **systemd** = PID 1, the init system / project manager. Starts & supervises everything.
@@ -366,7 +620,7 @@ sudo systemctl restart docker     # apply the new ExecStart to the running proce
 ```
 /etc/systemd/system/      ← your files & overrides (wins)
 /run/systemd/system/      ← runtime (ephemeral)
-/usr/lib/systemd/system/  ← package-installed (never edit)
+/usr/lib/d/system/  ← package-installed (never edit)
 ```
 
 **Service file skeleton**
@@ -391,7 +645,7 @@ sudo systemctl start   <name>     # run now
 sudo systemctl stop    <name>     # stop now
 sudo systemctl enable  <name>     # start on boot (symlink)
 sudo systemctl disable <name>     # don't start on boot
-sudo systemctl enable --now  <name>   # boot + now
+sudo systemctl enable --now  <na>   # boot + now
 sudo systemctl disable --now <name>   # stop now + remove from boot
 sudo systemctl restart <name>     # stop then start
 systemctl status  <name>          # state, PID, memory, recent logs
@@ -416,6 +670,51 @@ sudo systemctl daemon-reload
 sudo systemctl restart <name>
 ```
 
+**Service types (`Type=`)**
+```
+simple   long-running, stays alive; "active" the moment ExecStart launches     (boardfarm, nginx)
+oneshot  runs → does work → exits; "active/done" once it finishes           timer jobs)
+notify   long-running, but the app sends READY=1 to systemd when truly ready   (Docker)
+
+Default:  no Type + has ExecStart  → simple
+          no Type + no  ExecStart  → oneshot
+          (…but always check for an EXPLICIT Type= first — e.g. Docker sets Type=notify)
+```
+`Type=notify` mechanism:
+```
+systemd sets env NOTIFY_SOCKET  →  app sends datagram "READY=1" to it  →  systemd marks unit active
+  Python:  sdnotify.SystemdNotifier().notify("READY=1")   (in FastAPI lifespan startup)
+ystemd-notify --ready
+  Gotcha:  default NotifyAccess=main accepts READY=1 ONLY from the Main PID.
+           With a `uv run ...` wrapper the app is a CHILD → use NotifyAccess=all
+           (or run the app directly so it IS the Main PID).
+```
+
+**Scheduled jobs (cron vs systemd timers)**
+```
+cron            = old scheduler; one crontab line = schedule + command
+                  files in /var/spool/cron/crontabs/<user>
+                  format:  min hour day month weekday  command   (*/5 = every 5 min)
+
+stemd timer   = two unit files, same discovery paths as .service:
+                  <name>.service  → WHAT to run   (Type=oneshot, runs & exits)
+                  <name>.timer    → WHEN to run   (WantedBy=timers.target)
+                  same base name = auto-paired; timer triggers service
+
+"migrated to systemd" = a HUMAN recreated the cron line as .timer + .service,
+                        then commented out the cron line. Not automatic.
+                        "# MIGRATED-TO-SYSTEMD ..." is just a humaeadcrumb comment.
+```
+```bash
+systemctl cat <name>.timer <name>.service     # schedule + command
+systemctl list-timers --all | grep <name>     # next/last fire time
+systemctl status <name>.service               # did the last run pass/fail?
+journalctl -u <name>.service --since today     # per-run logs / repeating errors
+sudo systemctl start <name>.service           # run ONE time now (test a fix)
+sudo systemctl enable  --now <name>.timer     # turn the SCHEDULE on
+sudo systemctl disable --now <name>.timer     # turn the SCHEDULE off
+```
+
 **Golden rules to remember**
 - File must end in `.service` and live in a systemd dir (or be symlinked into one).
 - Filename = unit name = unique identity; `/etc` shadows `/usr/lib`.
@@ -423,3 +722,7 @@ sudo systemctl restart <name>
 - Drop-ins live in `<unit>.service.d/*.conf`, merged automatically, no registration.
 - `ExecStart` needs empty-then-set to truly replace.
 - Edited a unit or drop-in? → `daemon-reload` (+ `restart` to apply to the running process).
+- **Types:** `Type=` tellstemd *how to know the service started*. `simple` = launched; `oneshot` = exited; `notify` = app sent `READY=1`. Default is `simple` (with `ExecStart`) / `oneshot` (without) — but **set it explicitly** and always check for an explicit `Type=`.
+- **`Type=notify`:** app sends `READY=1` to `$NOTIFY_SOCKET`; with a `uv run` / wrapper setup use `NotifyAccess=all` or the child's signal is ignored.
+- **Timers:** `.timer` + `.service` share a base name and the same discovery paths; periodic job = `Type=oneshot`; enable the `.timer`, start the `.service`, read logs from the `.service`.**
+- **Migration is a human act** — systemd never absorbs a cron job on its own; the `# MIGRATED-TO-SYSTEMD` line is just a comment.
