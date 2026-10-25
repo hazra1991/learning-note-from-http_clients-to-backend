@@ -1,0 +1,27 @@
+-- Step 1: Create the isolated application database
+CREATE DATABASE myapp_db;
+
+-- Step 2: Create your backend user
+CREATE USER myapp_user WITH PASSWORD 'your_strong_password_here';
+
+-- Step 3: Connect to your database
+\c myapp_db
+
+-- Step 4: Grant database connection rights
+GRANT CONNECT ON DATABASE myapp_db TO myapp_user;
+
+-- Step 5: Grant full schema creation rights (Required for ORM migrations)
+GRANT USAGE, CREATE ON SCHEMA public TO myapp_user;
+
+-- Step 6: Make myapp_user the owner of the public schema so it can run ALTER / DROP on tables created during migrations
+ALTER SCHEMA public OWNER TO myapp_user;
+
+-- Step 7: Grant full privileges on all existing & future tables and sequences
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO myapp_user;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO myapp_user;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+GRANT ALL PRIVILEGES ON TABLES TO myapp_user;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+GRANT ALL PRIVILEGES ON SEQUENCES TO myapp_user;
