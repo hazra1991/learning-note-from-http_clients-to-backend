@@ -1,0 +1,354 @@
+
+<h2 class="sr-only">Interactive transformer architecture overview showing model types, training flow, and inference pipeline</h2>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+.wrap{font-family:var(--font-sans);color:var(--color-text-primary);padding:0.5rem 0}
+.sec{margin:0 0 2rem}
+.sec-title{font-size:16px;font-weight:500;margin:0 0 10px;color:var(--color-text-primary)}
+.sec-sub{font-size:13px;color:var(--color-text-secondary);margin:0 0 14px;line-height:1.5}
+.tabs{display:flex;gap:6px;margin:0 0 14px;flex-wrap:wrap}
+.tab{font-size:12px;padding:5px 12px;border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-tertiary);background:transparent;color:var(--color-text-secondary);cursor:pointer;transition:all .15s;font-family:inherit}
+.tab:hover{background:var(--color-background-secondary)}
+.tab.on{background:var(--color-background-info);color:var(--color-text-info);border-color:var(--color-border-info)}
+.card{background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:14px 16px;margin:0 0 10px}
+.card.hl{border-color:var(--color-border-info);background:var(--color-background-info)}
+.pipe{display:flex;align-items:center;gap:0;overflow-x:auto;padding:6px 0}
+.pbox{flex:0 0 auto;text-align:center;padding:8px 10px;border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-tertiary);background:var(--color-background-primary);cursor:pointer;transition:all .15s;min-width:78px;max-width:120px;position:relative}
+.pbox:hover{border-color:var(--color-border-secondary)}
+.pbox.on{border-color:var(--color-border-info);background:var(--color-background-info)}
+.pbox .nm{font-size:11px;font-weight:500;line-height:1.3}
+.pbox .sh{font-size:10px;color:var(--color-text-tertiary);margin-top:2px;font-family:var(--font-mono)}
+.arr{flex:0 0 auto;color:var(--color-text-tertiary);font-size:16px;padding:0 2px;user-select:none}
+.detail{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:12px 14px;margin:8px 0 0;font-size:13px;line-height:1.65;color:var(--color-text-secondary);display:none}
+.detail.show{display:block}
+.detail b{color:var(--color-text-primary);font-weight:500}
+.detail code{font-family:var(--font-mono);font-size:12px;background:var(--color-background-tertiary);padding:1px 5px;border-radius:4px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.mcard{padding:12px;border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-tertiary);background:var(--color-background-primary);cursor:pointer;transition:all .15s}
+.mcard:hover{border-color:var(--color-border-secondary)}
+.mcard.on{border-color:var(--color-border-info);background:var(--color-background-info)}
+.mcard .tt{font-size:13px;font-weight:500;margin:0 0 4px}
+.mcard .ex{font-size:11px;color:var(--color-text-tertiary)}
+.mcard .tg{font-size:11px;margin-top:6px;padding:3px 8px;border-radius:var(--border-radius-md);display:inline-block}
+.tg-gen{background:var(--color-background-success);color:var(--color-text-success)}
+.tg-und{background:var(--color-background-info);color:var(--color-text-info)}
+.tg-both{background:var(--color-background-warning);color:var(--color-text-warning)}
+.mask-vis{display:flex;gap:2px;margin:6px 0}
+.mask-vis .cell{width:22px;height:22px;border-radius:3px;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:500}
+.cell.yes{background:var(--color-background-info);color:var(--color-text-info)}
+.cell.no{background:var(--color-background-secondary);color:var(--color-text-tertiary)}
+.cell.hdr{background:transparent;color:var(--color-text-tertiary);font-size:9px}
+.legend{display:flex;gap:14px;margin:8px 0 0;font-size:11px;color:var(--color-text-tertiary)}
+.legend span{display:flex;align-items:center;gap:4px}
+.ldot{width:10px;height:10px;border-radius:3px}
+.sep{border:none;border-top:0.5px solid var(--color-border-tertiary);margin:1.5rem 0}
+.compare-row{display:grid;grid-template-columns:140px 1fr 1fr 1fr;gap:0;font-size:12px;border-bottom:0.5px solid var(--color-border-tertiary);align-items:center}
+.compare-row:last-child{border-bottom:none}
+.compare-row div{padding:6px 8px}
+.compare-row.hdr div{font-weight:500;color:var(--color-text-primary);font-size:11px}
+.compare-row:not(.hdr) div:first-child{color:var(--color-text-secondary);font-size:11px}
+@media(max-width:500px){.grid3{grid-template-columns:1fr}.compare-row{grid-template-columns:100px 1fr 1fr 1fr;font-size:10px}}
+</style>
+
+<div class="wrap">
+
+<!-- SECTION 1: MODEL TYPES -->
+<div class="sec">
+<div class="sec-title">Three model families — same engine, different wiring</div>
+<div class="sec-sub">Every modern language model uses the same transformer block (attention → feed-forward → residual). What differs is the mask pattern and the training task. Click each to see how.</div>
+
+<div class="grid3" id="models">
+  <div class="mcard on" onclick="showModel(0)">
+    <div class="tt">Decoder-only</div>
+    <div class="ex">GPT, LLaMA, Claude, Mistral</div>
+    <div class="tg tg-gen">generation</div>
+  </div>
+  <div class="mcard" onclick="showModel(1)">
+    <div class="tt">Encoder-only</div>
+    <div class="ex">BERT, RoBERTa, DeBERTa</div>
+    <div class="tg tg-und">understanding</div>
+  </div>
+  <div class="mcard" onclick="showModel(2)">
+    <div class="tt">Encoder-decoder</div>
+    <div class="ex">T5, BART, mBART</div>
+    <div class="tg tg-both">both</div>
+  </div>
+</div>
+
+<div id="model-detail-0" class="detail show">
+  <b>Decoder: sees only the past → generates future</b><br><br>
+  Each token can only attend to itself and tokens before it (causal mask). Trained to predict the next token. This is what makes ChatGPT-style generation work — the model produces one token at a time, always looking backward, never forward.<br><br>
+  <b>Attention mask pattern:</b> (rows = who's looking, columns = who they can see)
+  <div class="mask-vis">
+    <div><div class="cell hdr"></div><div class="cell hdr">T</div><div class="cell hdr">c</div><div class="cell hdr">s</div><div class="cell hdr">o</div></div>
+    <div><div class="cell hdr">The</div><div class="cell yes">✓</div><div class="cell no">✗</div><div class="cell no">✗</div><div class="cell no">✗</div></div>
+    <div><div class="cell hdr">cat</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell no">✗</div><div class="cell no">✗</div></div>
+    <div><div class="cell hdr">sat</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell no">✗</div></div>
+    <div><div class="cell hdr">on</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div></div>
+  </div>
+  <div class="legend"><span><div class="ldot" style="background:var(--color-background-info)"></div> can see</span><span><div class="ldot" style="background:var(--color-background-secondary)"></div> masked (−∞)</span></div>
+  <br><b>Training task:</b> next-token prediction<br>
+  <code>"The cat" → predict "sat"</code><br><br>
+  <b>Best for:</b> text generation, chat, code completion, creative writing
+</div>
+
+<div id="model-detail-1" class="detail">
+  <b>Encoder: sees everything → understands deeply</b><br><br>
+  Every token sees every other token in both directions. No mask at all. Trained by masking 15% of tokens randomly and predicting them. Because it sees full context (left AND right), it builds richer understanding — but it can't generate text token-by-token.<br><br>
+  <b>Attention mask pattern:</b>
+  <div class="mask-vis">
+    <div><div class="cell hdr"></div><div class="cell hdr">T</div><div class="cell hdr">[M]</div><div class="cell hdr">s</div><div class="cell hdr">o</div></div>
+    <div><div class="cell hdr">The</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div></div>
+    <div><div class="cell hdr">[M]</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div></div>
+    <div><div class="cell hdr">sat</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div></div>
+    <div><div class="cell hdr">on</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div><div class="cell yes">✓</div></div>
+  </div>
+  <div class="legend"><span><div class="ldot" style="background:var(--color-background-info)"></div> can see (all open)</span></div>
+  <br><b>Training task:</b> masked language modeling (fill the blanks)<br>
+  <code>"The [MASK] sat on" → predict "cat"</code><br><br>
+  <b>Best for:</b> classification, similarity, search, NER, question answering
+</div>
+
+<div id="model-detail-2" class="detail">
+  <b>Encoder-decoder: understand input → generate output</b><br><br>
+  Two stacks. The encoder reads the full input with bidirectional attention (no mask). The decoder generates output left-to-right with causal mask. A special <b>cross-attention</b> layer lets the decoder look at the encoder's output — "what parts of the input are relevant to the token I'm generating now?"<br><br>
+  <b>Attention pattern:</b><br>
+  Encoder self-attention: fully open (like BERT)<br>
+  Decoder self-attention: causal mask (like GPT)<br>
+  Decoder cross-attention: decoder Q attends to encoder K,V (fully open)<br><br>
+  <b>Training task:</b> sequence-to-sequence (input → output)<br>
+  <code>"translate English to French: The cat sat" → "Le chat s'est assis"</code><br><br>
+  <b>Best for:</b> translation, summarization, structured generation from input
+</div>
+</div>
+
+<hr class="sep">
+
+<!-- SECTION 2: TRAINING PIPELINE -->
+<div class="sec">
+<div class="sec-title">Training pipeline — how a model learns</div>
+<div class="sec-sub">Click any step to see what happens inside. Shapes show the tensor dimensions flowing through.</div>
+
+<div class="tabs">
+  <button class="tab on" onclick="showPipe('train')">Pretraining (decoder)</button>
+  <button class="tab" onclick="showPipe('bert')">Pretraining (encoder)</button>
+</div>
+
+<div id="pipe-train" class="pipe">
+  <div class="pbox on" onclick="showStep('train',0)"><div class="nm">Raw text</div><div class="sh">strings</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('train',1)"><div class="nm">Tokenize</div><div class="sh">[seq_len]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('train',2)"><div class="nm">Embed + Pos</div><div class="sh">[seq, 768]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('train',3)"><div class="nm">N × Transformer</div><div class="sh">[seq, 768]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('train',4)"><div class="nm">LM head</div><div class="sh">[seq, vocab]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('train',5)"><div class="nm">Softmax</div><div class="sh">probs</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('train',6)"><div class="nm">Loss</div><div class="sh">scalar</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('train',7)"><div class="nm">Backprop + Adam</div><div class="sh">update all W</div></div>
+</div>
+
+<div id="pipe-bert" class="pipe" style="display:none">
+  <div class="pbox on" onclick="showStep('bert',0)"><div class="nm">Raw text</div><div class="sh">strings</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('bert',1)"><div class="nm">Tokenize + Mask 15%</div><div class="sh">[seq_len]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('bert',2)"><div class="nm">Embed + Pos + Seg</div><div class="sh">[seq, 768]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('bert',3)"><div class="nm">N × Transformer</div><div class="sh">[seq, 768]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('bert',4)"><div class="nm">MLM head</div><div class="sh">[masked, vocab]</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('bert',5)"><div class="nm">Softmax + Loss</div><div class="sh">scalar</div></div>
+  <div class="arr">→</div>
+  <div class="pbox" onclick="showStep('bert',6)"><div class="nm">Backprop + Adam</div><div class="sh">update all W</div></div>
+</div>
+
+<div id="step-details"></div>
+</div>
+
+<hr class="sep">
+
+<!-- SECTION 3: INFERENCE -->
+<div class="sec">
+<div class="sec-title">Inference — what happens when you use a model</div>
+<div class="sec-sub">No backpropagation. Forward pass only. Weights are frozen. This is what runs when you send a prompt to ChatGPT or use BERT for search.</div>
+
+<div class="tabs">
+  <button class="tab on" onclick="showInf('dec')">Decoder (generation)</button>
+  <button class="tab" onclick="showInf('enc')">Encoder (understanding)</button>
+</div>
+
+<div id="inf-dec">
+  <div class="pipe">
+    <div class="pbox on" onclick="showInfStep('dec',0)"><div class="nm">Prompt</div><div class="sh">"The cat"</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('dec',1)"><div class="nm">Tokenize</div><div class="sh">[2]</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('dec',2)"><div class="nm">Forward pass</div><div class="sh">[2, 768]→layers</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('dec',3)"><div class="nm">Logits</div><div class="sh">[vocab]</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('dec',4)"><div class="nm">Sample</div><div class="sh">1 token</div></div>
+    <div class="arr">↻</div>
+    <div class="pbox" onclick="showInfStep('dec',5)"><div class="nm">Append + repeat</div><div class="sh">autoregressive</div></div>
+  </div>
+  <div id="inf-dec-details"></div>
+</div>
+
+<div id="inf-enc" style="display:none">
+  <div class="pipe">
+    <div class="pbox on" onclick="showInfStep('enc',0)"><div class="nm">Input text</div><div class="sh">"Great movie!"</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('enc',1)"><div class="nm">Tokenize + [CLS]</div><div class="sh">[seq]</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('enc',2)"><div class="nm">Forward pass</div><div class="sh">[seq, 768]</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('enc',3)"><div class="nm">[CLS] vector</div><div class="sh">[768]</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" onclick="showInfStep('enc',4)"><div class="nm">Task head</div><div class="sh">[num_classes]</div></div>
+  </div>
+  <div id="inf-enc-details"></div>
+</div>
+</div>
+
+<hr class="sep">
+
+<!-- SECTION 4: INSIDE ONE TRANSFORMER BLOCK -->
+<div class="sec">
+<div class="sec-title">Inside one transformer block</div>
+<div class="sec-sub">Every layer — in every model type — has this same internal structure. The input shape equals the output shape, which is why you can stack them.</div>
+<div class="card">
+  <div class="pipe" style="flex-wrap:wrap;justify-content:center">
+    <div class="pbox" style="border-color:var(--color-border-info);min-width:100px"><div class="nm">Input</div><div class="sh">[seq, d]</div></div>
+    <div class="arr">→</div>
+    <div class="pbox"><div class="nm">Layer norm</div><div class="sh">stabilize</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" style="border-color:var(--color-border-warning)"><div class="nm">Multi-head attention</div><div class="sh">Q·K^T/√d → V</div></div>
+    <div class="arr">→</div>
+    <div class="pbox"><div class="nm">+ residual</div><div class="sh">x + Δ</div></div>
+    <div class="arr">→</div>
+    <div class="pbox"><div class="nm">Layer norm</div><div class="sh">stabilize</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" style="border-color:var(--color-border-success)"><div class="nm">FFN</div><div class="sh">d→4d→d</div></div>
+    <div class="arr">→</div>
+    <div class="pbox"><div class="nm">+ residual</div><div class="sh">x + Δ</div></div>
+    <div class="arr">→</div>
+    <div class="pbox" style="border-color:var(--color-border-info);min-width:100px"><div class="nm">Output</div><div class="sh">[seq, d]</div></div>
+  </div>
+  <div style="font-size:12px;color:var(--color-text-tertiary);margin-top:10px;line-height:1.6">
+    <b style="color:var(--color-text-warning)">Attention</b> mixes info across tokens (horizontal). <b style="color:var(--color-text-success)">FFN</b> processes each token deeply (vertical). <b>Residuals</b> keep gradients flowing and info preserved. <b>Layer norm</b> keeps numbers stable. Same shape in → same shape out → stackable.
+  </div>
+</div>
+</div>
+
+<hr class="sep">
+
+<!-- SECTION 5: QUICK COMPARISON TABLE -->
+<div class="sec">
+<div class="sec-title">At a glance</div>
+<div class="card" style="padding:0;overflow:hidden">
+  <div class="compare-row hdr">
+    <div></div><div>Decoder</div><div>Encoder</div><div>Enc-Dec</div>
+  </div>
+  <div class="compare-row"><div>Attention</div><div>Causal ▽</div><div>Full ■</div><div>Both</div></div>
+  <div class="compare-row"><div>Training task</div><div>Next token</div><div>Fill masked</div><div>Seq → seq</div></div>
+  <div class="compare-row"><div>Sees future?</div><div>No</div><div>Yes</div><div>Enc: yes, Dec: no</div></div>
+  <div class="compare-row"><div>Can generate?</div><div>Yes</div><div>No</div><div>Yes (decoder side)</div></div>
+  <div class="compare-row"><div>Output</div><div>Every position</div><div>[CLS] + masked</div><div>Decoder output</div></div>
+  <div class="compare-row"><div>Use case</div><div>Chat, code gen</div><div>Search, classify</div><div>Translate, summarize</div></div>
+  <div class="compare-row"><div>Examples</div><div>GPT-4, Claude, LLaMA</div><div>BERT, RoBERTa</div><div>T5, BART</div></div>
+</div>
+</div>
+
+</div>
+
+<script>
+const trainSteps = [
+  `<b>Raw text:</b> Books, web pages, code, Wikipedia — billions of documents. Cleaned, deduplicated, filtered for quality. This is done once before training begins.`,
+  `<b>Tokenize:</b> BPE (byte-pair encoding) splits text into sub-word tokens. <code>"unhappiness" → ["un", "happiness"]</code>. Vocabulary is built once (~50K tokens). Each token gets an integer ID. Output: a sequence of integers like <code>[464, 3797, 3332]</code>.`,
+  `<b>Embed + Position:</b> Each token ID looks up a row in the embedding table <code>[vocab, 768]</code> — pure lookup, no math. Position embeddings <code>[max_seq, 768]</code> are added element-wise. These are both random at first and learned during training. Output: <code>[seq_len, 768]</code>.`,
+  `<b>N × Transformer blocks:</b> The core of the model. Each block: LayerNorm → Multi-Head Attention (with causal mask) → residual add → LayerNorm → FFN → residual add. GPT-2 has 12 blocks. GPT-3 has 96. Each block has its own weights. Early layers learn syntax, late layers learn reasoning. Shape stays <code>[seq_len, 768]</code> throughout.`,
+  `<b>LM head:</b> Projects from the model's internal thinking space (768) to the answer space (vocab size). <code>[seq, 768] × [768, 50257] = [seq, 50257]</code>. Often uses weight tying — same matrix as the embedding table, transposed. Each score is a dot product measuring "how close is my hidden state to this vocab token?"`,
+  `<b>Softmax:</b> Converts raw logits to a valid probability distribution. <code>P(token_i) = e^(logit_i) / Σ e^(logit_j)</code>. All positive, sums to 1.0. The largest logit gets the highest probability.`,
+  `<b>Cross-entropy loss:</b> <code>loss = -log(P(correct token))</code>. If the model assigns 80% to the right answer → loss is 0.22 (good). If only 1% → loss is 4.6 (bad). Averaged across all positions in the sequence. A random model starts at loss ≈ log(50257) ≈ 10.8.`,
+  `<b>Backprop + Adam:</b> The loss flows backward through every layer. Each of the ~124M parameters gets a gradient (direction + magnitude of needed change). Adam optimizer smooths noisy gradients (momentum) and gives each weight its own learning rate (velocity). Weights get nudged. Repeat millions of times.`
+];
+
+const bertSteps = [
+  `<b>Raw text:</b> Same as decoder — massive text corpus, cleaned and deduplicated.`,
+  `<b>Tokenize + mask:</b> Uses WordPiece (BPE variant). Then randomly selects 15% of tokens: 80% become <code>[MASK]</code>, 10% become a random token, 10% stay unchanged. This 80/10/10 split prevents the model from only learning to predict when it sees [MASK]. BERT also adds <code>[CLS]</code> at the start and <code>[SEP]</code> between sentences.`,
+  `<b>Embed + Pos + Segment:</b> Three embeddings added together (not two like decoder). Token embedding + position embedding + segment embedding (0 for sentence A, 1 for sentence B). Segment embedding table is just <code>[2, 768]</code>. Output: <code>[seq, 768]</code>.`,
+  `<b>N × Transformer blocks:</b> Same architecture as decoder — but <b>no causal mask</b>. Every token sees every other token (fully bidirectional). This is the key difference. "cat" can see both "The" before it AND "sat" after it. After 12 layers, each vector has rich bidirectional context.`,
+  `<b>MLM head:</b> Only the masked positions get projected to vocabulary. <code>[num_masked, 768] × [768, 30522] = [num_masked, 30522]</code>. Non-masked positions don't contribute to the loss. Also: [CLS] output → linear [768, 2] for next-sentence prediction (optional, later found unnecessary).`,
+  `<b>Softmax + loss:</b> Cross-entropy only at masked positions. <code>loss = avg(-log(P(correct)) for each masked token)</code>. Only ~15% of tokens contribute to loss per sequence (vs 100% for decoder). Less data-efficient per sequence, but bidirectional context compensates.`,
+  `<b>Backprop + Adam:</b> Same as decoder — gradients for all ~110M parameters, Adam updates with momentum and adaptive learning rates.`
+];
+
+const infDecSteps = [
+  `<b>Prompt:</b> The user's text. This is all the model gets — no memory of previous conversations (unless they're included in the prompt). Everything the model needs to know must be in this text.`,
+  `<b>Tokenize:</b> Same tokenizer as training. <code>"The cat" → [464, 3797]</code>. Fixed vocabulary, fixed rules.`,
+  `<b>Forward pass:</b> Embed + position → through all N transformer layers → final LayerNorm. Identical to training, but <b>no gradient computation</b>. Just the forward direction. All weights are frozen. Faster and uses less memory than training (no optimizer state needed).`,
+  `<b>Logits:</b> Take the LAST token's output vector (it has seen all previous tokens via causal attention). Project to vocabulary: <code>[768] × [768, 50257] = [50257]</code>. Optionally apply grammar constraints here (set invalid token logits to −∞). Then softmax → probabilities.`,
+  `<b>Sample:</b> Pick one token from the probability distribution. Methods: <b>Greedy</b> (always pick highest prob — deterministic but repetitive), <b>Temperature</b> (scale logits by T before softmax — higher T = more random), <b>Top-k</b> (keep only top k tokens), <b>Top-p</b> (keep smallest set summing to ≥p).`,
+  `<b>Append + repeat:</b> The chosen token is appended to the sequence. <code>"The cat" + "sat" → "The cat sat"</code>. Run the forward pass again with the longer sequence. Repeat until a stop token or max length. This is <b>autoregressive generation</b> — one token at a time. KV-caching speeds this up by reusing computation from previous tokens.`
+];
+
+const infEncSteps = [
+  `<b>Input text:</b> The text you want the model to understand. Could be a sentence to classify, a document to embed, a question + passage pair.`,
+  `<b>Tokenize + [CLS]:</b> Prepend <code>[CLS]</code> token, append <code>[SEP]</code>. No masking at inference — that was only for training. The model sees the full text as-is.`,
+  `<b>Forward pass:</b> Through all transformer layers with full bidirectional attention. Every token's output vector now contains context from the entire sequence in both directions. No gradients, no weight updates.`,
+  `<b>[CLS] vector:</b> Position 0's output — the <code>[CLS]</code> token. Because it attended to every other token across 12 layers, it's a <code>[768]</code>-dimensional summary of the entire input. This is what gets used for classification. (Alternatively, mean-pool all token vectors for sentence embeddings.)`,
+  `<b>Task head:</b> A small linear layer on top: <code>[768] → [num_classes]</code> → softmax. For sentiment: <code>[768] → [2] → [P(positive), P(negative)]</code>. For NER: every token's vector → <code>[768] → [entity_types]</code>. For similarity: compare two [CLS] vectors with cosine distance.`
+];
+
+function showModel(i) {
+  document.querySelectorAll('#models .mcard').forEach((c,j) => c.classList.toggle('on', j===i));
+  [0,1,2].forEach(j => {
+    const el = document.getElementById('model-detail-'+j);
+    if(el) el.classList.toggle('show', j===i);
+  });
+}
+
+function showPipe(which) {
+  document.querySelectorAll('.tabs')[0]?.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  event.target.classList.add('on');
+  document.getElementById('pipe-train').style.display = which==='train'?'flex':'none';
+  document.getElementById('pipe-bert').style.display = which==='bert'?'flex':'none';
+  document.getElementById('step-details').innerHTML = '';
+  // reset active states
+  document.querySelectorAll('#pipe-train .pbox, #pipe-bert .pbox').forEach((p,j) => p.classList.toggle('on', j===0));
+  showStep(which, 0);
+}
+
+function showStep(pipe, idx) {
+  const container = document.getElementById('pipe-'+pipe);
+  container.querySelectorAll('.pbox').forEach((p,j) => p.classList.toggle('on', j===idx));
+  const steps = pipe==='train' ? trainSteps : bertSteps;
+  document.getElementById('step-details').innerHTML = '<div class="detail show">'+steps[idx]+'</div>';
+}
+
+function showInf(which) {
+  const tabs = document.querySelectorAll('.tabs')[1];
+  tabs?.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  event.target.classList.add('on');
+  document.getElementById('inf-dec').style.display = which==='dec'?'block':'none';
+  document.getElementById('inf-enc').style.display = which==='enc'?'block':'none';
+}
+
+function showInfStep(pipe, idx) {
+  const parent = document.getElementById('inf-'+pipe);
+  parent.querySelectorAll('.pbox').forEach((p,j) => p.classList.toggle('on', j===idx));
+  const steps = pipe==='dec' ? infDecSteps : infEncSteps;
+  const target = document.getElementById('inf-'+pipe+'-details');
+  target.innerHTML = '<div class="detail show">'+steps[idx]+'</div>';
+}
+
+// Init
+showStep('train', 0);
+showInfStep('dec', 0);
+</script>
